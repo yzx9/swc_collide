@@ -14,6 +14,7 @@ def resolve_collide_sphere_by_moving(
     r: npt.NDArray,
     *,
     gap: float = 0,
+    step: float = 0.01,
     it_max: int = 1000,
     verbose: int = 0,
 ):
@@ -21,37 +22,38 @@ def resolve_collide_sphere_by_moving(
         if verbose >= level:
             print(*args)
 
-    log(2, "xyz:\n", xyz, "\nr:\n", r)
+    log(1, "xyz:\n", xyz, "\nr:\n", r)
 
     N = xyz.shape[0]
     eye_mask = np.logical_not(np.identity(N, dtype=np.bool_))
     changed = []
 
     d_target = r.reshape(-1, 1) + r.reshape(1, -1) + gap  # (N, N)
-    log(2, f"d_target:\n", d_target)
+    weight = get_weight(r)
+    log(2, f"d_target:\n", d_target, "\nweight:\n", weight)
 
     v, d = None, None
 
-    def calc_overlap():
+    def calc_overlap() -> npt.NDArray[np.bool_]:
         nonlocal v, d
         v = xyz.reshape(-1, 1, 3) - xyz  # (N, N, 3)
         d = np.linalg.norm(v, axis=2, keepdims=True)  # (N, N, 1)
         if np.equal(d, 0).any(where=eye_mask.reshape(N, N, 1)):
             raise ValueError("coincide in position")
 
-        return np.maximum(d_target - d[..., 0], 0)  # (N, N)
+        return np.greater(d_target - d[..., 0], EPS)  # (N, N)
 
     for i in range(it_max):
         log(1, f"it: {i}")
 
         overlap = calc_overlap()
-        if np.less(overlap, EPS, where=eye_mask).all():
+        if not overlap.any(where=eye_mask):
             log(1, "non-overlap")
             break
 
         v_norm = np.zeros_like(v)
-        v_norm = np.divide(v, d, where=d != 0, out=v_norm)  # type:ignore
-        v_ab = overlap.reshape(*overlap.shape, 1) * v_norm
+        v_norm = np.divide(v, d, where=d != 0, out=v_norm)  # type: ignore
+        v_ab = step * overlap.reshape(N, N, 1) * v_norm
         log(3, "overlap:\n", overlap, "\nv_overlap:\n", v_ab)
 
         moving = v_ab.sum(axis=1)
@@ -64,15 +66,23 @@ def resolve_collide_sphere_by_moving(
             print("changed: ", changes)
     else:
         log(1, "reach max iterates")
+        if verbose >= 1:
+            overlap = calc_overlap()
+            if overlap.any(where=eye_mask):
+                print("overlap detect")
 
     if verbose >= 1:
+        log(2, "distance: \n", d.squeeze())  # type: ignore
+
         changed = list(set(changed))
         print("changed: ", changed)
 
-    if verbose >= 3:
-        print("distance: \n", d.squeeze())  # type:ignore
-
     return xyz
+
+
+def get_weight(r: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
+    r3 = np.power(r, 3)
+    return r3 * r3.reshape(1, -1)  # type:ignore
 
 
 def main(fname: str, *, output: Optional[str] = None, **kwargs):
@@ -97,6 +107,7 @@ if __name__ == "__main__":
     parser.add_argument("fname", type=str)
     parser.add_argument("--output", type=str)
     parser.add_argument("--gap", type=float, default=0)
+    parser.add_argument("--step", type=float, default=0.01)
     parser.add_argument("--it_max", type=int, default=1000)
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-vv", action="store_true")
@@ -108,6 +119,7 @@ if __name__ == "__main__":
         args.fname,
         output=args.output,
         gap=args.gap,
+        step=args.step,
         it_max=args.it_max,
         verbose=verbose,
     )
