@@ -9,7 +9,7 @@ import swcgeom
 EPS = 1e-6
 
 
-def resolve_collide_sphere_by_moving(
+def revolve(
     xyz: npt.NDArray,
     r: npt.NDArray,
     *,
@@ -77,7 +77,7 @@ def resolve_collide_sphere_by_moving(
 
 def main(fname: str, *, output: Optional[str] = None, **kwargs):
     t = swcgeom.Tree.from_swc(fname)
-    new_xyz = resolve_collide_sphere_by_moving(t.xyz(), t.r(), **kwargs)
+    new_xyz = revolve(t.xyz(), t.r(), **kwargs)
     for i, name in enumerate([t.names.x, t.names.y, t.names.z]):
         t.ndata[name] = new_xyz[..., i]
 
