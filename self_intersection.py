@@ -6,6 +6,7 @@ import numpy as np
 import swcgeom
 from tqdm import tqdm
 
+from helper import mask_neighborhood
 from resampler import BranchIsometricResampler, Resampler
 
 
@@ -14,34 +15,18 @@ def detect(t: swcgeom.Tree, *, mask_neighbor: int = 10) -> int:
     r_min = t.r().min()
     resampler = Resampler(BranchIsometricResampler(2 * r_min))
 
-    t_new = resampler(t)
-    N = t_new.number_of_nodes()
+    t_resampled = resampler(t)
+    N = t_resampled.number_of_nodes()
 
-    xyz = np.array([n.xyz() for n in t_new])
+    xyz = np.array([n.xyz() for n in t_resampled])
     v = xyz.reshape(N, 1, 3) - xyz.reshape(1, N, 3)
     d = np.linalg.norm(v, axis=2)
 
-    r = np.array([n.r for n in t_new])
+    r = np.array([n.r for n in t_resampled])
     d_target = r.reshape(N, 1) + r.reshape(1, N)
 
     valid = np.triu(np.ones((N, N), dtype=np.bool_), k=1)
-    # TODO following code would be very slow
-    for n in t_new:
-        s = [(n, 0)]
-        s = [(c, 1) for c in n.children()] + [(n.parent(), 1)]
-        while len(s):
-            neighbor, era = s.pop()
-            if neighbor is None or (
-                not valid[n.id][neighbor.id] and not valid[neighbor.id][n.id]
-            ):
-                continue
-
-            valid[n.id][neighbor.id] = False
-            valid[neighbor.id][n.id] = False
-            if era < mask_neighbor:
-                s.extend((c, era + 1) for c in neighbor.children())
-                if (p := neighbor.parent()) is not None:
-                    s.append((p, era + 1))
+    mask_neighborhood(t_resampled, mask_neighbor, out=valid)
 
     cnt = np.count_nonzero(np.less(d - d_target, 0, out=np.zeros_like(d), where=valid))
     return cnt
@@ -75,45 +60,38 @@ if __name__ == "__main__":
             cnt = detect(t)
             print(f"detect {cnt} self-intersection")
 
-        case "plot_trends" if os.path.isdir(args.fname):
-            fnames = os.listdir(args.fname)
-
-            def calc(fname: str, radius: float):
-                t = swcgeom.Tree.from_swc(os.path.join(args.fname, fname))
-                t.ndata[t.names.r] = np.full_like(t.r(), radius)
-                return detect(t) > 0
-
-            radii = np.arange(args.rmin, args.rmax, args.step)
-            data = [
-                sum(calc(fname, r) for fname in fnames)
-                for r in (tqdm(radii) if args.verbose else radii)
-            ]
-
-            plt.figure()
-            plt.plot(radii, data, marker="o")
-            plt.xlabel("Radius")
-            plt.ylabel("Number of files with self-intersections")
-            plt.title("Number of files with self-intersections over radius")
-
-            if args.output:
-                plt.savefig(args.output)
-            else:
-                plt.show()
-
         case "plot_trends":
-            t = swcgeom.Tree.from_swc(args.fname)
             radii = np.arange(args.rmin, args.rmax, args.step)
-            data = []
+            radii_it = tqdm(radii) if args.verbose else radii
 
-            for r in tqdm(radii) if args.verbose else radii:
-                t.ndata[t.names.r] = np.full_like(t.r(), r)
-                data.append(detect(t))
+            if os.path.isdir(args.fname):
+                fnames = os.listdir(args.fname)
 
-            plt.figure()
-            plt.plot(radii, data, marker="o")
-            plt.xlabel("Radius")
-            plt.ylabel("Number of self-intersections")
-            plt.title("Self-intersections over radius")
+                def calc(fname: str, radius: float):
+                    t = swcgeom.Tree.from_swc(os.path.join(args.fname, fname))
+                    t.ndata[t.names.r] = np.full_like(t.r(), radius)
+                    return detect(t) > 0
+
+                data = [sum(calc(fname, r) for fname in fnames) for r in radii_it]
+
+                plt.figure()
+                plt.plot(radii, data, marker="o")
+                plt.xlabel("Radius")
+                plt.ylabel("Number of files with self-intersections")
+                plt.title("Number of files with self-intersections over radius")
+            else:
+                t = swcgeom.Tree.from_swc(args.fname)
+                data = []
+
+                for r in radii_it:
+                    t.ndata[t.names.r] = np.full_like(t.r(), r)
+                    data.append(detect(t))
+
+                plt.figure()
+                plt.plot(radii, data, marker="o")
+                plt.xlabel("Radius")
+                plt.ylabel("Number of self-intersections")
+                plt.title("Self-intersections over radius")
 
             if args.output:
                 plt.savefig(args.output)
