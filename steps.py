@@ -6,10 +6,12 @@ import numpy as np
 import numpy.typing as npt
 import swcgeom
 
+from resampler import BranchIsometricResampler, Resampler
+
 EPS = 1e-6
 
 
-def resolve_collide_sphere_by_moving(
+def resolve(
     xyz: npt.NDArray,
     r: npt.NDArray,
     *,
@@ -85,9 +87,14 @@ def get_weight(r: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
     return r3 * r3.reshape(1, -1)  # type:ignore
 
 
-def main(fname: str, *, output: Optional[str] = None, **kwargs):
+def main(fname: str, *, output: Optional[str] = None, resample: bool = False, **kwargs):
     t = swcgeom.Tree.from_swc(fname)
-    new_xyz = resolve_collide_sphere_by_moving(t.xyz(), t.r(), **kwargs)
+    if resample:
+        r_min = t.r().min()
+        resampler = Resampler(BranchIsometricResampler(2 * r_min))
+        t = resampler(t)
+
+    new_xyz = resolve(t.xyz(), t.r(), **kwargs)
     for i, name in enumerate([t.names.x, t.names.y, t.names.z]):
         t.ndata[name] = new_xyz[..., i]
 
@@ -109,6 +116,7 @@ if __name__ == "__main__":
     parser.add_argument("--gap", type=float, default=0)
     parser.add_argument("--step", type=float, default=0.01)
     parser.add_argument("--it_max", type=int, default=1000)
+    parser.add_argument("--resample", action="store_true")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-vv", action="store_true")
     parser.add_argument("-vvv", action="store_true")
