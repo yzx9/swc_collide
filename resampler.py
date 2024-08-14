@@ -130,3 +130,13 @@ class Resampler(Transform[Tree, Tree]):
             k: [self.resampler(br) for br in brs] for k, brs in t.branches.items()
         }
         return self.assembler(t)
+
+
+class IsometricResampler(Resampler):
+    def __init__(
+        self, distance: float, *, adjust_last_gap: bool = True, **kwargs
+    ) -> None:
+        branch_resampler = BranchIsometricResampler(
+            distance, adjust_last_gap=adjust_last_gap, **kwargs
+        )
+        super().__init__(branch_resampler)

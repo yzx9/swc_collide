@@ -7,13 +7,13 @@ import swcgeom
 from tqdm import tqdm
 
 from helper import mask_neighborhood
-from resampler import BranchIsometricResampler, Resampler
+from resampler import IsometricResampler
 
 
 def detect(t: swcgeom.Tree, *, mask_neighbor: int = 10) -> int:
     # assert all of the r is the same
     r_min = t.r().min()
-    resampler = Resampler(BranchIsometricResampler(2 * r_min))
+    resampler = IsometricResampler(2 * r_min)
 
     t_resampled = resampler(t)
     N = t_resampled.number_of_nodes()
@@ -26,7 +26,7 @@ def detect(t: swcgeom.Tree, *, mask_neighbor: int = 10) -> int:
     d_target = r.reshape(N, 1) + r.reshape(1, N)
 
     valid = np.triu(np.ones((N, N), dtype=np.bool_), k=1)
-    mask_neighborhood(t_resampled, mask_neighbor, out=valid)
+    mask_neighborhood(t_resampled, mask_neighbor, out=valid, mask_value=False)
 
     cnt = np.count_nonzero(np.less(d - d_target, 0, out=np.zeros_like(d), where=valid))
     return cnt
