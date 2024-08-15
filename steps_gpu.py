@@ -55,6 +55,9 @@ def run(
     d_target = r.reshape(-1, 1) + r.reshape(1, -1) + gap
     weight = wp.ones(d_target.shape, dtype=wp.float32, device=device)
 
+    xyz = wp.from_numpy(xyz, dtype=wp.vec3f, device=device)
+    d_target = wp.from_numpy(d_target, dtype=wp.float32, device=device)
+
     for _ in tqdm(range(iterates)) if verbose else range(iterates):
         out = wp.zeros(r.shape[0], dtype=wp.vec3f, device=device)
         wp.launch(
@@ -116,15 +119,17 @@ if __name__ == "__main__":
     parser.add_argument("--step", type=float, default=0.01)
     parser.add_argument("--iterates", type=int, default=10000)
     parser.add_argument("--no-resample", action="store_true")
+    parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("-v", "--verbose", action="store_true")
 
     args = parser.parse_args()
     main(
         args.fname,
         output=args.output,
-        resample=not args.no_resample,
         gap=args.gap,
         iterates=args.iterates,
         step=args.step,
+        resample=not args.no_resample,
+        device=args.device,
         verbose=args.verbose,
     )
