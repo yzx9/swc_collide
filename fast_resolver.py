@@ -10,28 +10,27 @@ from tqdm import tqdm
 
 from resampler import IsometricResampler
 
+__all__ = ["resolve", "count"]
+
 
 def resolve(
     fname: str,
     *,
     output: Optional[str] = None,
-    step: float = 0.01,
-    iterates: int = 10000,
+    step: float = 0.1,
+    iterates: int = 1000,
     device: str = "cpu",
     verbose: bool = False,
     **kwargs,
 ):
-    t, xyz, r = preprocess(fname, device=device, verbose=verbose, **kwargs)
-    for _ in tqdm(range(iterates)) if verbose else range(iterates):
-        out = wp.zeros(r.shape[0], dtype=wp.vec3f, device=device)
-        wp.launch(
-            resolve_kernel,
-            dim=r.shape,
-            inputs=[xyz, r, step],
-            outputs=[out],
-            device=device,
-        )
-        xyz = out
+    with wp.ScopedDevice(device):
+        t, N, xyz, r = preprocess(fname, verbose=verbose, **kwargs)
+        for _ in tqdm(range(iterates)) if verbose else range(iterates):
+            direction = wp.zeros(N, dtype=wp.vec3f)
+            wp.launch(
+                resolve_compute, dim=(N, N - 1), inputs=[xyz, r], outputs=[direction]
+            )
+            wp.launch(resolve_move, dim=(N,), inputs=[direction, step], outputs=[xyz])
 
     xyz = xyz.numpy()
     for i, name in enumerate([t.names.x, t.names.y, t.names.z]):
@@ -45,9 +44,12 @@ def resolve(
         t.to_swc(output)
 
 
-def count(fname, *, device: str = "cpu", **kwargs) -> int:
-    t, _, _ = preprocess(fname, device=device, **kwargs)
-    out = wp.zeros(t.number_of_nodes(), dtype=wp.bool, device=device)
+def count(fname: str, *, device: str = "cpu", **kwargs) -> int:
+    with wp.ScopedDevice(device):
+        _, N, xyz, r = preprocess(fname, **kwargs)
+        out = wp.zeros(N, dtype=wp.bool)
+        wp.launch(_count, dim=(N, N - 1), inputs=[xyz, r], outputs=[out])
+
     return np.count_nonzero(out.numpy())
 
 
@@ -56,7 +58,6 @@ def preprocess(
     *,
     resample: bool = False,
     gap: float = 0,
-    device: str = "cpu",
     verbose: bool = False,
 ):
     t = swcgeom.Tree.from_swc(fname)
@@ -65,37 +66,52 @@ def preprocess(
         resampler = IsometricResampler(2 * r_min)
         t = resampler(t)
 
+    N = t.number_of_nodes()
     if verbose:
-        print(f"n_nodes: {t.number_of_nodes()}")
+        print(f"n_nodes: {N}")
 
     xyz, r = t.xyz(), t.r()
     r += gap / 2  # add half gap to radius
 
-    xyz = wp.from_numpy(xyz, dtype=wp.vec3f, device=device)
-    r = wp.from_numpy(r, dtype=wp.float32, device=device)
-    return t, xyz, r
+    xyz = wp.from_numpy(xyz, dtype=wp.vec3f)
+    r = wp.from_numpy(r, dtype=wp.float32)
+    return t, N, xyz, r
 
 
 @wp.kernel
-def resolve_kernel(
+def resolve_compute(
     xyz: wp.array(dtype=wp.vec3f),
     r: wp.array(dtype=wp.float32),
-    step: wp.float32,
     out: wp.array(dtype=wp.vec3f),
 ):
-    i = wp.tid()
-    direction = get_weighted_direction(xyz, r, i)
-    out[i] = xyz[i] + step * direction
+    i, j = wp.tid()
+    if j >= i:
+        j = j + 1  # skip eye items
+    direction = get_weighted_direction(xyz, r, i, j)
+    wp.atomic_add(out, i, direction)  # type: ignore
 
 
 @wp.kernel
-def count_kernel(
+def resolve_move(
+    direction: wp.array(dtype=wp.vec3f),
+    step: wp.float32,
+    xyz: wp.array(dtype=wp.vec3f),
+):
+    i = wp.tid()
+    vec = wp.normalize(direction[i])
+    xyz[i] = xyz[i] + step * vec
+
+
+@wp.kernel
+def _count(
     xyz: wp.array(dtype=wp.vec3f),
     r: wp.array(dtype=wp.float32),
     out: wp.array(dtype=wp.bool),
 ):
-    i = wp.tid()
-    direction = get_weighted_direction(xyz, r, i)
+    i, j = wp.tid()
+    if j >= i:
+        j = j + 1  # skip eye items
+    direction = get_weighted_direction(xyz, r, i, j)
     if wp.length(direction) > 0:
         out[i] = True
 
@@ -105,66 +121,62 @@ def get_weighted_direction(
     xyz: wp.array(dtype=wp.vec3f),
     r: wp.array(dtype=wp.float32),
     i: int,
+    j: int,
 ) -> wp.vec3f:
-    vec = wp.vec3f(0.0, 0.0, 0.0)
-    for j in range(xyz.shape[0]):
-        if i != j:
-            dis = wp.length(xyz[j] - xyz[i])
-            if dis < r[i] + r[j]:
-                weight = r[i] / (r[i] + r[j])
-                vec += (xyz[i] - xyz[j]) * weight
+    if i == j:
+        return wp.vec3f(0.0, 0.0, 0.0)
 
-    l = wp.length(vec)
-    if l > 0:
-        vec /= l
+    vec = xyz[j] - xyz[i]
+    dis = wp.length(vec)
+    if dis >= r[i] + r[j]:
+        return wp.vec3f(0.0, 0.0, 0.0)
 
-    return vec
+    weight = r[j] / (r[i] + r[j])
+    return wp.normalize(vec) * weight
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
+    def add_common_argument(parser):
+        parser.add_argument("fname", type=str)
+        parser.add_argument("--gap", type=float, default=0)
+        parser.add_argument("--no-resample", action="store_true")
+        parser.add_argument("--device", type=str, default="cpu")
+        parser.add_argument("-v", "--verbose", action="store_true")
+
+    def extract_common_args(args):
+        return {
+            "fname": args.fname,
+            "gap": args.gap,
+            "resample": not args.no_resample,
+            "device": args.device,
+            "verbose": args.verbose,
+        }
+
     sub_resolve = subparsers.add_parser("resolve", help="resolve self-intersection")
-    sub_resolve.add_argument("fname", type=str)
+    add_common_argument(sub_resolve)
     sub_resolve.add_argument("--output", type=str)
-    sub_resolve.add_argument("--gap", type=float, default=0)
-    sub_resolve.add_argument("--step", type=float, default=0.01)
-    sub_resolve.add_argument("--iterates", type=int, default=10000)
-    sub_resolve.add_argument("--no-resample", action="store_true")
-    sub_resolve.add_argument("--device", type=str, default="cpu")
-    sub_resolve.add_argument("-v", "--verbose", action="store_true")
+    sub_resolve.add_argument("--step", type=float, default=0.1)
+    sub_resolve.add_argument("--iterates", type=int, default=1000)
 
     sub_count = subparsers.add_parser("count", help="count self-intersection")
-    sub_count.add_argument("fname", type=str)
-    sub_count.add_argument("--gap", type=float, default=0)
-    sub_count.add_argument("--no-resample", action="store_true")
-    sub_count.add_argument("--device", type=str, default="cpu")
-    sub_count.add_argument("-v", "--verbose", action="store_true")
+    add_common_argument(sub_count)
 
     args = parser.parse_args()
     match args.command:
         case "resolve":
             resolve(
-                args.fname,
                 output=args.output,
-                gap=args.gap,
                 iterates=args.iterates,
                 step=args.step,
-                resample=not args.no_resample,
-                device=args.device,
-                verbose=args.verbose,
+                **extract_common_args(args),
             )
 
-        case "detect":
-            cnt = count(
-                args.fname,
-                gap=args.gap,
-                resample=not args.no_resample,
-                device=args.device,
-                verbose=args.verbose,
-            )
-            print(f"detect {cnt} self-intersection")
+        case "count":
+            cnt = count(**extract_common_args(args))
+            print(f"Detected intersections at {cnt} nodes.")
 
         case _ as cmd:
             raise ValueError(f"unexpected command: {cmd}")
