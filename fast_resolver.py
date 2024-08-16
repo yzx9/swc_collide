@@ -60,12 +60,16 @@ def count(fname: str, *, device: str = "cpu", **kwargs) -> int:
 def preprocess(
     fname: str,
     *,
+    radius: float = 0,
     resample: bool = False,
     gap: float = 0,
     mask_neighborhood: int = 15,
     verbose: bool = False,
 ):
     t = swcgeom.Tree.from_swc(fname)
+    if radius > 0:
+        t.ndata[t.names.r] = np.full_like(t.r(), fill_value=radius)
+
     if resample:
         r_min = t.r().min()
         resampler = IsometricResampler(2 * r_min)
@@ -154,6 +158,7 @@ if __name__ == "__main__":
     def add_common_argument(parser):
         parser.add_argument("fname", type=str)
         parser.add_argument("--gap", type=float, default=0)
+        parser.add_argument("--radius", type=float, default=0)
         parser.add_argument("--no-resample", action="store_true")
         parser.add_argument("--mask_neighborhood", type=int, default=15)
         parser.add_argument("--device", type=str, default="cpu")
@@ -163,6 +168,7 @@ if __name__ == "__main__":
         return {
             "fname": args.fname,
             "gap": args.gap,
+            "radius": args.radius,
             "resample": not args.no_resample,
             "mask_neighborhood": args.mask_neighborhood,
             "device": args.device,
