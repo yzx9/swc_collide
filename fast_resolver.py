@@ -8,6 +8,7 @@ import swcgeom
 import warp as wp
 from tqdm import tqdm
 
+from helper import mask_neighborhood as _mask_neighborhood
 from resampler import IsometricResampler
 
 __all__ = ["resolve", "count"]
@@ -24,11 +25,14 @@ def resolve(
     **kwargs,
 ):
     with wp.ScopedDevice(device):
-        t, N, xyz, r = preprocess(fname, verbose=verbose, **kwargs)
+        t, N, xyz, r, mask = preprocess(fname, verbose=verbose, **kwargs)
         for _ in tqdm(range(iterates)) if verbose else range(iterates):
             direction = wp.zeros(N, dtype=wp.vec3f)
             wp.launch(
-                resolve_compute, dim=(N, N - 1), inputs=[xyz, r], outputs=[direction]
+                resolve_compute,
+                dim=(N, N - 1),
+                inputs=[xyz, r, mask],
+                outputs=[direction],
             )
             wp.launch(resolve_move, dim=(N,), inputs=[direction, step], outputs=[xyz])
 
@@ -46,9 +50,9 @@ def resolve(
 
 def count(fname: str, *, device: str = "cpu", **kwargs) -> int:
     with wp.ScopedDevice(device):
-        _, N, xyz, r = preprocess(fname, **kwargs)
+        _, N, xyz, r, mask = preprocess(fname, **kwargs)
         out = wp.zeros(N, dtype=wp.bool)
-        wp.launch(_count, dim=(N, N - 1), inputs=[xyz, r], outputs=[out])
+        wp.launch(_count, dim=(N, N - 1), inputs=[xyz, r, mask], outputs=[out])
 
     return np.count_nonzero(out.numpy())
 
@@ -58,6 +62,7 @@ def preprocess(
     *,
     resample: bool = False,
     gap: float = 0,
+    mask_neighborhood: int = 15,
     verbose: bool = False,
 ):
     t = swcgeom.Tree.from_swc(fname)
@@ -73,22 +78,27 @@ def preprocess(
     xyz, r = t.xyz(), t.r()
     r += gap / 2  # add half gap to radius
 
+    mask = _mask_neighborhood(t, mask_neighborhood)
+
     xyz = wp.from_numpy(xyz, dtype=wp.vec3f)
     r = wp.from_numpy(r, dtype=wp.float32)
-    return t, N, xyz, r
+    mask = wp.from_numpy(mask, dtype=wp.bool)
+    return t, N, xyz, r, mask
 
 
 @wp.kernel
 def resolve_compute(
     xyz: wp.array(dtype=wp.vec3f),
     r: wp.array(dtype=wp.float32),
+    mask: wp.array(ndim=2, dtype=wp.bool),
     out: wp.array(dtype=wp.vec3f),
 ):
     i, j = wp.tid()
     if j >= i:
         j = j + 1  # skip eye items
-    direction = get_weighted_direction(xyz, r, i, j)
-    wp.atomic_add(out, i, direction)  # type: ignore
+    direction = get_weighted_direction(xyz, r, mask, i, j)
+    if wp.length(direction) > 0:
+        wp.atomic_add(out, i, direction)  # type: ignore
 
 
 @wp.kernel
@@ -106,12 +116,13 @@ def resolve_move(
 def _count(
     xyz: wp.array(dtype=wp.vec3f),
     r: wp.array(dtype=wp.float32),
+    mask: wp.array(ndim=2, dtype=wp.bool),
     out: wp.array(dtype=wp.bool),
 ):
     i, j = wp.tid()
     if j >= i:
         j = j + 1  # skip eye items
-    direction = get_weighted_direction(xyz, r, i, j)
+    direction = get_weighted_direction(xyz, r, mask, i, j)
     if wp.length(direction) > 0:
         out[i] = True
 
@@ -120,10 +131,11 @@ def _count(
 def get_weighted_direction(
     xyz: wp.array(dtype=wp.vec3f),
     r: wp.array(dtype=wp.float32),
+    mask: wp.array(ndim=2, dtype=wp.bool),
     i: int,
     j: int,
 ) -> wp.vec3f:
-    if i == j:
+    if i == j or mask[i][j]:
         return wp.vec3f(0.0, 0.0, 0.0)
 
     vec = xyz[j] - xyz[i]
@@ -143,6 +155,7 @@ if __name__ == "__main__":
         parser.add_argument("fname", type=str)
         parser.add_argument("--gap", type=float, default=0)
         parser.add_argument("--no-resample", action="store_true")
+        parser.add_argument("--mask_neighborhood", type=int, default=15)
         parser.add_argument("--device", type=str, default="cpu")
         parser.add_argument("-v", "--verbose", action="store_true")
 
@@ -151,6 +164,7 @@ if __name__ == "__main__":
             "fname": args.fname,
             "gap": args.gap,
             "resample": not args.no_resample,
+            "mask_neighborhood": args.mask_neighborhood,
             "device": args.device,
             "verbose": args.verbose,
         }
