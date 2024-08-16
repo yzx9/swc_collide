@@ -1,5 +1,4 @@
 # pyright: reportInvalidTypeForm=false, reportArgumentType=false
-import argparse
 import os
 from typing import Optional
 
@@ -20,21 +19,19 @@ def resolve(
     output: Optional[str] = None,
     step: float = 0.1,
     iterates: int = 1000,
-    device: str = "cpu",
     verbose: bool = False,
     **kwargs,
 ):
-    with wp.ScopedDevice(device):
-        t, N, xyz, r, mask = preprocess(fname, verbose=verbose, **kwargs)
-        for _ in tqdm(range(iterates)) if verbose else range(iterates):
-            direction = wp.zeros(N, dtype=wp.vec3f)
-            wp.launch(
-                resolve_compute,
-                dim=(N, N - 1),
-                inputs=[xyz, r, mask],
-                outputs=[direction],
-            )
-            wp.launch(resolve_move, dim=(N,), inputs=[direction, step], outputs=[xyz])
+    t, N, xyz, r, mask = preprocess(fname, verbose=verbose, **kwargs)
+    for _ in tqdm(range(iterates)) if verbose else range(iterates):
+        direction = wp.zeros(N, dtype=wp.vec3f)
+        wp.launch(
+            resolve_compute,
+            dim=(N, N - 1),
+            inputs=[xyz, r, mask],
+            outputs=[direction],
+        )
+        wp.launch(resolve_move, dim=(N,), inputs=[direction, step], outputs=[xyz])
 
     xyz = xyz.numpy()
     for i, name in enumerate([t.names.x, t.names.y, t.names.z]):
@@ -48,11 +45,10 @@ def resolve(
         t.to_swc(output)
 
 
-def count(fname: str, *, device: str = "cpu", verbose: bool = False, **kwargs) -> int:
-    with wp.ScopedDevice(device):
-        _, N, xyz, r, mask = preprocess(fname, verbose=verbose, **kwargs)
-        out = wp.zeros(N, dtype=wp.bool)
-        wp.launch(_count, dim=(N, N - 1), inputs=[xyz, r, mask], outputs=[out])
+def count(fname: str, *, verbose: bool = False, **kwargs) -> int:
+    _, N, xyz, r, mask = preprocess(fname, verbose=verbose, **kwargs)
+    out = wp.zeros(N, dtype=wp.bool)
+    wp.launch(_count, dim=(N, N - 1), inputs=[xyz, r, mask], outputs=[out])
 
     out = out.numpy()
     cnt = np.count_nonzero(out)
@@ -105,6 +101,7 @@ def resolve_compute(
     i, j = wp.tid()
     if j >= i:
         j = j + 1  # skip eye items
+
     direction = get_weighted_direction(xyz, r, mask, i, j)
     if wp.length(direction) > 0:
         wp.atomic_add(out, i, direction)  # type: ignore
@@ -112,9 +109,7 @@ def resolve_compute(
 
 @wp.kernel
 def resolve_move(
-    direction: wp.array(dtype=wp.vec3f),
-    step: wp.float32,
-    xyz: wp.array(dtype=wp.vec3f),
+    direction: wp.array(dtype=wp.vec3f), step: wp.float32, xyz: wp.array(dtype=wp.vec3f)
 ):
     i = wp.tid()
     vec = wp.normalize(direction[i])
@@ -131,6 +126,7 @@ def _count(
     i, j = wp.tid()
     if j >= i:
         j = j + 1  # skip eye items
+
     direction = get_weighted_direction(xyz, r, mask, i, j)
     if wp.length(direction) > 0:
         out[i] = True
@@ -157,6 +153,8 @@ def get_weighted_direction(
 
 
 if __name__ == "__main__":
+    import argparse
+
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -176,8 +174,8 @@ if __name__ == "__main__":
             "radius": args.radius,
             "resample": not args.no_resample,
             "mask_neighborhood": args.mask_neighborhood,
-            "device": args.device,
             "verbose": args.verbose,
+            # "device": args.device, # consumed
         }
 
     sub_resolve = subparsers.add_parser("resolve", help="resolve self-intersection")
@@ -190,18 +188,19 @@ if __name__ == "__main__":
     add_common_argument(sub_count)
 
     args = parser.parse_args()
-    match args.command:
-        case "resolve":
-            resolve(
-                output=args.output,
-                iterates=args.iterates,
-                step=args.step,
-                **extract_common_args(args),
-            )
+    with wp.ScopedDevice(args.device):
+        match args.command:
+            case "resolve":
+                resolve(
+                    output=args.output,
+                    iterates=args.iterates,
+                    step=args.step,
+                    **extract_common_args(args),
+                )
 
-        case "count":
-            cnt = count(**extract_common_args(args))
-            print(f"Detected intersections at {cnt} nodes.")
+            case "count":
+                cnt = count(**extract_common_args(args))
+                print(f"Detected intersections at {cnt} nodes.")
 
-        case _ as cmd:
-            raise ValueError(f"unexpected command: {cmd}")
+            case _ as cmd:
+                raise ValueError(f"unexpected command: {cmd}")
