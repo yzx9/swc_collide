@@ -48,13 +48,18 @@ def resolve(
         t.to_swc(output)
 
 
-def count(fname: str, *, device: str = "cpu", **kwargs) -> int:
+def count(fname: str, *, device: str = "cpu", verbose: bool = False, **kwargs) -> int:
     with wp.ScopedDevice(device):
-        _, N, xyz, r, mask = preprocess(fname, **kwargs)
+        _, N, xyz, r, mask = preprocess(fname, verbose=verbose, **kwargs)
         out = wp.zeros(N, dtype=wp.bool)
         wp.launch(_count, dim=(N, N - 1), inputs=[xyz, r, mask], outputs=[out])
 
-    return np.count_nonzero(out.numpy())
+    out = out.numpy()
+    cnt = np.count_nonzero(out)
+    if verbose and cnt:
+        print(np.argwhere(out).flatten())
+
+    return cnt
 
 
 def preprocess(
