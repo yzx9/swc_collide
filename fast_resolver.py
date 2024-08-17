@@ -91,7 +91,7 @@ def preprocess(
     if verbose:
         print(f"n_nodes: {N}")
 
-    xyz, r = t.xyz(), t.r()
+    xyz, r = t.xyz().copy(), t.r().copy()
     r += gap / 2  # add half gap to radius
 
     mask = _mask_neighborhood(t, mask_neighborhood)
@@ -137,7 +137,7 @@ def get_weighted_direction(scene: Scene, i: int, j: int) -> wp.vec3f:
     if i == j or scene.mask[i][j]:
         return wp.vec3f(0.0, 0.0, 0.0)
 
-    vec = scene.xyz[j] - scene.xyz[i]
+    vec = scene.xyz[i] - scene.xyz[j]
     if wp.length(vec) >= scene.r[i] + scene.r[j]:
         return wp.vec3f(0.0, 0.0, 0.0)
 
