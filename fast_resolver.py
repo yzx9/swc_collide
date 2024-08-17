@@ -22,18 +22,13 @@ def resolve(
     verbose: bool = False,
     **kwargs,
 ):
-    t, N, xyz, r, mask = preprocess(fname, verbose=verbose, **kwargs)
+    t, N, scene = preprocess(fname, verbose=verbose, **kwargs)
     for _ in tqdm(range(iterates)) if verbose else range(iterates):
         direction = wp.zeros(N, dtype=wp.vec3f)
-        wp.launch(
-            resolve_compute,
-            dim=(N, N - 1),
-            inputs=[xyz, r, mask],
-            outputs=[direction],
-        )
-        wp.launch(resolve_move, dim=(N,), inputs=[direction, step], outputs=[xyz])
+        wp.launch(resolve_compute, dim=(N, N - 1), inputs=[scene], outputs=[direction])
+        wp.launch(resolve_move, dim=(N,), inputs=[direction, step], outputs=[scene.xyz])
 
-    xyz = xyz.numpy()
+    xyz = scene.xyz.numpy()
     for i, name in enumerate([t.names.x, t.names.y, t.names.z]):
         t.ndata[name] = xyz[..., i]
 
@@ -46,9 +41,9 @@ def resolve(
 
 
 def count(fname: str, *, verbose: bool = False, **kwargs) -> int:
-    _, N, xyz, r, mask = preprocess(fname, verbose=verbose, **kwargs)
+    _, N, scene = preprocess(fname, verbose=verbose, **kwargs)
     out = wp.zeros(N, dtype=wp.bool)
-    wp.launch(_count, dim=(N, N - 1), inputs=[xyz, r, mask], outputs=[out])
+    wp.launch(_count, dim=(N, N - 1), inputs=[scene], outputs=[out])
 
     out = out.numpy()
     cnt = np.count_nonzero(out)
@@ -56,6 +51,13 @@ def count(fname: str, *, verbose: bool = False, **kwargs) -> int:
         print(np.argwhere(out).flatten())
 
     return cnt
+
+
+@wp.struct
+class Scene:
+    xyz: wp.array(dtype=wp.vec3f)
+    r: wp.array(dtype=wp.float32)
+    mask: wp.array(ndim=2, dtype=wp.bool)
 
 
 def preprocess(
@@ -85,24 +87,20 @@ def preprocess(
 
     mask = _mask_neighborhood(t, mask_neighborhood)
 
-    xyz = wp.from_numpy(xyz, dtype=wp.vec3f)
-    r = wp.from_numpy(r, dtype=wp.float32)
-    mask = wp.from_numpy(mask, dtype=wp.bool)
-    return t, N, xyz, r, mask
+    scene = Scene()
+    scene.xyz = wp.from_numpy(xyz, dtype=wp.vec3f)
+    scene.r = wp.from_numpy(r, dtype=wp.float32)
+    scene.mask = wp.from_numpy(mask, dtype=wp.bool)
+    return t, N, scene
 
 
 @wp.kernel
-def resolve_compute(
-    xyz: wp.array(dtype=wp.vec3f),
-    r: wp.array(dtype=wp.float32),
-    mask: wp.array(ndim=2, dtype=wp.bool),
-    out: wp.array(dtype=wp.vec3f),
-):
+def resolve_compute(scene: Scene, out: wp.array(dtype=wp.vec3f)):
     i, j = wp.tid()
     if j >= i:
         j = j + 1  # skip eye items
 
-    direction = get_weighted_direction(xyz, r, mask, i, j)
+    direction = get_weighted_direction(scene, i, j)
     if wp.length(direction) > 0:
         wp.atomic_add(out, i, direction)  # type: ignore
 
@@ -117,38 +115,27 @@ def resolve_move(
 
 
 @wp.kernel
-def _count(
-    xyz: wp.array(dtype=wp.vec3f),
-    r: wp.array(dtype=wp.float32),
-    mask: wp.array(ndim=2, dtype=wp.bool),
-    out: wp.array(dtype=wp.bool),
-):
+def _count(scene: Scene, out: wp.array(dtype=wp.bool)):
     i, j = wp.tid()
     if j >= i:
         j = j + 1  # skip eye items
 
-    direction = get_weighted_direction(xyz, r, mask, i, j)
+    direction = get_weighted_direction(scene, i, j)
     if wp.length(direction) > 0:
         out[i] = True
 
 
 @wp.func
-def get_weighted_direction(
-    xyz: wp.array(dtype=wp.vec3f),
-    r: wp.array(dtype=wp.float32),
-    mask: wp.array(ndim=2, dtype=wp.bool),
-    i: int,
-    j: int,
-) -> wp.vec3f:
-    if i == j or mask[i][j]:
+def get_weighted_direction(scene: Scene, i: int, j: int) -> wp.vec3f:
+    if i == j or scene.mask[i][j]:
         return wp.vec3f(0.0, 0.0, 0.0)
 
-    vec = xyz[j] - xyz[i]
+    vec = scene.xyz[j] - scene.xyz[i]
     dis = wp.length(vec)
-    if dis >= r[i] + r[j]:
+    if dis >= scene.r[i] + scene.r[j]:
         return wp.vec3f(0.0, 0.0, 0.0)
 
-    weight = r[j] / (r[i] + r[j])
+    weight = scene.r[j] / (scene.r[i] + scene.r[j])
     return wp.normalize(vec) * weight
 
 
@@ -188,6 +175,7 @@ if __name__ == "__main__":
     add_common_argument(sub_count)
 
     args = parser.parse_args()
+    wp.config.quiet = not args.verbose
     with wp.ScopedDevice(args.device):
         match args.command:
             case "resolve":
