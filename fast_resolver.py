@@ -12,6 +12,8 @@ from resampler import IsometricResampler
 
 __all__ = ["resolve", "count"]
 
+Vec3fArr = wp.array(dtype=wp.vec3f)
+
 
 def resolve(
     fname: str,
@@ -62,7 +64,7 @@ def count(
 
 @wp.struct
 class Scene:
-    xyz: wp.array(dtype=wp.vec3f)
+    xyz: Vec3fArr
     r: wp.array(dtype=wp.float32)
     mask: wp.array(ndim=2, dtype=wp.bool)
 
@@ -102,7 +104,7 @@ def preprocess(
 
 
 @wp.kernel
-def resolve_compute(scene: Scene, out: wp.array(dtype=wp.vec3f)):
+def resolve_compute(scene: Scene, out: Vec3fArr):
     i, j = wp.tid()
     if j >= i:
         j = j + 1  # skip eye items
@@ -113,9 +115,7 @@ def resolve_compute(scene: Scene, out: wp.array(dtype=wp.vec3f)):
 
 
 @wp.kernel
-def resolve_move(
-    direction: wp.array(dtype=wp.vec3f), step: wp.float32, xyz: wp.array(dtype=wp.vec3f)
-):
+def resolve_move(direction: Vec3fArr, step: wp.float32, xyz: Vec3fArr):
     i = wp.tid()
     vec = wp.normalize(direction[i])
     xyz[i] = xyz[i] + step * vec
@@ -138,8 +138,7 @@ def get_weighted_direction(scene: Scene, i: int, j: int) -> wp.vec3f:
         return wp.vec3f(0.0, 0.0, 0.0)
 
     vec = scene.xyz[j] - scene.xyz[i]
-    dis = wp.length(vec)
-    if dis >= scene.r[i] + scene.r[j]:
+    if wp.length(vec) >= scene.r[i] + scene.r[j]:
         return wp.vec3f(0.0, 0.0, 0.0)
 
     weight = scene.r[j] / (scene.r[i] + scene.r[j])

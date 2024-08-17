@@ -20,6 +20,9 @@ def mask_neighborhood(
     else:
         assert out.shape == (N, N)
 
+    if rank <= 0:
+        return out
+
     for n in t:
         s = [(c, 1) for c in n.children()]  # node, rank
         if (p := n.parent()) is not None:
@@ -35,7 +38,7 @@ def mask_neighborhood(
             out[n.id][neighbor.id] = mask_value
             out[neighbor.id][n.id] = mask_value
             if r < rank:
-                for c in neighbor.children():  # TODO this is vary slow
+                for c in neighbor.children():
                     if c.id not in visited:
                         s.append((c, r + 1))
                         visited.add(c.id)
