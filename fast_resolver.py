@@ -16,10 +16,10 @@ __all__ = ["resolve", "count"]
 def resolve(
     fname: str,
     *,
-    output: Optional[str] = None,
     step: float = 0.1,
     iterates: int = 1000,
     verbose: bool = False,
+    output: Optional[str] = None,
     **kwargs,
 ):
     t, N, scene = preprocess(fname, verbose=verbose, **kwargs)
@@ -40,8 +40,10 @@ def resolve(
         t.to_swc(output)
 
 
-def count(fname: str, *, verbose: bool = False, **kwargs) -> int:
-    _, N, scene = preprocess(fname, verbose=verbose, **kwargs)
+def count(
+    fname: str, *, verbose: bool = False, output: Optional[str] = None, **kwargs
+) -> int:
+    t, N, scene = preprocess(fname, verbose=verbose, **kwargs)
     out = wp.zeros(N, dtype=wp.bool)
     wp.launch(_count, dim=(N, N - 1), inputs=[scene], outputs=[out])
 
@@ -49,6 +51,11 @@ def count(fname: str, *, verbose: bool = False, **kwargs) -> int:
     cnt = np.count_nonzero(out)
     if verbose and cnt:
         print(np.argwhere(out).flatten())
+
+    if output is not None:
+        t.ndata[t.names.type] = np.full_like(t.type(), fill_value=1)
+        t.ndata[t.names.type][out] = 2
+        t.to_swc(output)
 
     return cnt
 
@@ -152,6 +159,7 @@ if __name__ == "__main__":
         parser.add_argument("--no-resample", action="store_true")
         parser.add_argument("--mask_neighborhood", type=int, default=15)
         parser.add_argument("--device", type=str, default="cpu")
+        parser.add_argument("-o", "--output", type=str, required=False)
         parser.add_argument("-v", "--verbose", action="store_true")
 
     def extract_common_args(args):
@@ -161,13 +169,13 @@ if __name__ == "__main__":
             "radius": args.radius,
             "resample": not args.no_resample,
             "mask_neighborhood": args.mask_neighborhood,
+            "output": args.output,
             "verbose": args.verbose,
             # "device": args.device, # consumed
         }
 
     sub_resolve = subparsers.add_parser("resolve", help="resolve self-intersection")
     add_common_argument(sub_resolve)
-    sub_resolve.add_argument("--output", type=str)
     sub_resolve.add_argument("--step", type=float, default=0.1)
     sub_resolve.add_argument("--iterates", type=int, default=1000)
 
@@ -180,10 +188,7 @@ if __name__ == "__main__":
         match args.command:
             case "resolve":
                 resolve(
-                    output=args.output,
-                    iterates=args.iterates,
-                    step=args.step,
-                    **extract_common_args(args),
+                    iterates=args.iterates, step=args.step, **extract_common_args(args)
                 )
 
             case "count":
