@@ -1,5 +1,6 @@
 # pyright: reportInvalidTypeForm=false, reportArgumentType=false
 import os
+import warnings
 from typing import Optional
 
 import numpy as np
@@ -28,7 +29,15 @@ def resolve(
     for _ in tqdm(range(iterates)) if verbose else range(iterates):
         direction = wp.zeros(N, dtype=wp.vec3f)
         wp.launch(resolve_compute, dim=(N, N - 1), inputs=[scene], outputs=[direction])
-        wp.launch(resolve_move, dim=(N,), inputs=[direction, step], outputs=[scene.xyz])
+
+        flag = wp.zeros(1, dtype=wp.bool)
+        wp.launch(
+            resolve_move, dim=(N,), inputs=[direction, step], outputs=[scene.xyz, flag]
+        )
+        if not flag.numpy()[0]:
+            break
+    else:
+        warnings.warn("maximum iteration reached.")
 
     xyz = scene.xyz.numpy()
     for i, name in enumerate([t.names.x, t.names.y, t.names.z]):
@@ -67,6 +76,7 @@ class Scene:
     xyz: Vec3fArr
     r: wp.array(dtype=wp.float32)
     mask: wp.array(ndim=2, dtype=wp.bool)
+    gap: wp.float32
 
 
 def preprocess(
@@ -75,7 +85,7 @@ def preprocess(
     radius: float = 0,
     resample: bool = False,
     gap: float = 0,
-    mask_neighborhood: int = 15,
+    mask_neighborhood: int = 5,
     verbose: bool = False,
 ):
     t = swcgeom.Tree.from_swc(fname)
@@ -91,15 +101,13 @@ def preprocess(
     if verbose:
         print(f"n_nodes: {N}")
 
-    xyz, r = t.xyz().copy(), t.r().copy()
-    r += gap / 2  # add half gap to radius
-
     mask = _mask_neighborhood(t, mask_neighborhood)
 
     scene = Scene()
-    scene.xyz = wp.from_numpy(xyz, dtype=wp.vec3f)
-    scene.r = wp.from_numpy(r, dtype=wp.float32)
+    scene.xyz = wp.from_numpy(t.xyz(), dtype=wp.vec3f)
+    scene.r = wp.from_numpy(t.r(), dtype=wp.float32)
     scene.mask = wp.from_numpy(mask, dtype=wp.bool)
+    scene.gap = wp.float32(gap)
     return t, N, scene
 
 
@@ -115,10 +123,14 @@ def resolve_compute(scene: Scene, out: Vec3fArr):
 
 
 @wp.kernel
-def resolve_move(direction: Vec3fArr, step: wp.float32, xyz: Vec3fArr):
+def resolve_move(
+    direction: Vec3fArr, step: wp.float32, xyz: Vec3fArr, flag: wp.array(dtype=wp.bool)
+):
     i = wp.tid()
-    vec = wp.normalize(direction[i])
-    xyz[i] = xyz[i] + step * vec
+    if wp.length(direction[i]) > 0:
+        vec = wp.normalize(direction[i])
+        xyz[i] = xyz[i] + step * vec
+        flag[0] = True
 
 
 @wp.kernel
@@ -138,7 +150,7 @@ def get_weighted_direction(scene: Scene, i: int, j: int) -> wp.vec3f:
         return wp.vec3f(0.0, 0.0, 0.0)
 
     vec = scene.xyz[i] - scene.xyz[j]
-    if wp.length(vec) >= scene.r[i] + scene.r[j]:
+    if wp.length(vec) >= scene.r[i] + scene.r[j] + scene.gap:
         return wp.vec3f(0.0, 0.0, 0.0)
 
     weight = scene.r[j] / (scene.r[i] + scene.r[j])
@@ -151,12 +163,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
-    def add_common_argument(parser):
+    def add_common_argument(parser, resample: bool = True):
         parser.add_argument("fname", type=str)
         parser.add_argument("--gap", type=float, default=0)
         parser.add_argument("--radius", type=float, default=0)
-        parser.add_argument("--no-resample", action="store_true")
-        parser.add_argument("--mask_neighborhood", type=int, default=15)
+        parser.add_argument("--resample", type=bool, default=resample)
+        parser.add_argument("--mask-neighborhood", type=int, default=5)
         parser.add_argument("--device", type=str, default="cpu")
         parser.add_argument("-o", "--output", type=str, required=False)
         parser.add_argument("-v", "--verbose", action="store_true")
@@ -166,7 +178,7 @@ if __name__ == "__main__":
             "fname": args.fname,
             "gap": args.gap,
             "radius": args.radius,
-            "resample": not args.no_resample,
+            "resample": args.resample,
             "mask_neighborhood": args.mask_neighborhood,
             "output": args.output,
             "verbose": args.verbose,
@@ -179,7 +191,7 @@ if __name__ == "__main__":
     sub_resolve.add_argument("--iterates", type=int, default=1000)
 
     sub_count = subparsers.add_parser("count", help="count self-intersection")
-    add_common_argument(sub_count)
+    add_common_argument(sub_count, resample=False)
 
     args = parser.parse_args()
     wp.config.quiet = not args.verbose

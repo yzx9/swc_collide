@@ -85,7 +85,7 @@ class BranchTreeAssembler(Transform[BranchTree, Tree]):
 
         return swcgeom.Tree(
             len(nodes),
-            source=f"Assemble from Branch Tree {x.source}",
+            source=x.source,
             comments=x.comments,
             names=x.names,
             **{
